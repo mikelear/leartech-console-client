@@ -1,0 +1,72 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: release
+spec:
+  pipelineSpec:
+    tasks:
+    - name: npm-publish
+      taskSpec:
+        stepTemplate:
+          env:
+          - name: HOME
+            value: /tekton/home
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef: { name: tekton-git, key: password, optional: true }
+          envFrom:
+          - secretRef: { name: jx-boot-job-env-vars, optional: true }
+          workingDir: /workspace/source
+        steps:
+        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone.yaml@versionStream
+        - name: next-version
+          image: node:22-alpine
+          script: |
+            #!/bin/sh
+            set -eu
+            apk add --no-cache git curl
+            curl -fsSL https://github.com/jenkins-x-plugins/jx-release-version/releases/download/v2.8.4/jx-release-version-linux-amd64.tar.gz | tar xz -C /usr/local/bin
+            jx-release-version --previous-version from-tag > VERSION
+            echo "Next version: $(cat VERSION)"
+        - name: npm-build-publish
+          image: node:22-alpine
+          env:
+          - name: CLUSTER_ID
+            valueFrom:
+              configMapKeyRef: { name: jx-cluster-config, key: CLUSTER_ID, optional: true }
+          script: |
+            #!/bin/sh
+            set -eu
+            apk add --no-cache git
+            VERSION=$(cat VERSION)
+            echo "Publishing @mikelear/leartech-console-client@${VERSION}"
+            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+            npm version "${VERSION}" --no-git-tag-version --allow-same-version
+            npm run build
+            # One global registry; publish only from the primary cluster (gcp).
+            if [ "${CLUSTER_ID:-unknown}" = "gcp" ]; then
+              echo "//npm.pkg.github.com/:_authToken=${GIT_TOKEN}" > .npmrc
+              echo "@mikelear:registry=https://npm.pkg.github.com" >> .npmrc
+              npm publish
+              echo "Published @mikelear/leartech-console-client@${VERSION}"
+            else
+              echo "==> CLUSTER_ID=${CLUSTER_ID:-unknown} — publish deferred to gcp (build verified)."
+            fi
+        - name: tag-release
+          image: node:22-alpine
+          script: |
+            #!/bin/sh
+            set -eu
+            apk add --no-cache git
+            VERSION=$(cat VERSION)
+            git config user.email "jenkins-x@googlegroups.com"
+            git config user.name "jenkins-x-bot"
+            git add --all
+            git commit -m "chore: release ${VERSION}" --allow-empty
+            git tag -a "v${VERSION}" -m "Release v${VERSION}"
+            git push origin "v${VERSION}"
+  podTemplate:
+    tolerations:
+    - { key: sku, operator: Equal, value: build, effect: NoSchedule }
+  serviceAccountName: tekton-bot
+  timeout: 30m0s

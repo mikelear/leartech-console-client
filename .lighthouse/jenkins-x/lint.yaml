@@ -1,0 +1,30 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: lint
+spec:
+  pipelineSpec:
+    tasks:
+    - name: lint
+      taskSpec:
+        stepTemplate:
+          env:
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef: { name: tekton-git, key: password, optional: true }
+          workingDir: /workspace/source
+        steps:
+        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone-pr.yaml@versionStream
+        - name: npm-lint
+          image: node:22-alpine
+          script: |
+            #!/bin/sh
+            set -eu
+            apk add --no-cache git
+            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+            npm run lint
+  podTemplate:
+    tolerations:
+    - { key: sku, operator: Equal, value: build, effect: NoSchedule }
+  serviceAccountName: tekton-bot
+  timeout: 30m0s
